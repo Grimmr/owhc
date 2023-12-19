@@ -1,0 +1,11 @@
+MessageParseExpectedOneFoundAnother{expected::Token.TokenType, found::Token.Token}:
+  The Parser Tried to consume a token of type <expected> but instead found <found> (which is not of type <expected>)
+
+MessageParseUseStatementHasAliasAndStar Token.TokenType:
+  The user has provided a use statement of the form "USE import-alias identifier :: * ;" which is not valid. see spec for accepted forms with and without */import-alias. <1> is the USE token that started the malformed use statement.
+
+MessageParseUseStatementDblColButNoMembers Token.TokenType:
+  The user has a provided a partial use statement of the form "USE import-alias? identifier ::" where the next token in the stream is not '*' or '{'. if we don't report this error we would get MessageParseExpectedOneFoundAnother of the form "expected ';' found some '::'". This error would be misleading as it implies the '::' is never valid when the actual problem is likely that the members section beyond the '::' is malformed. <1> is the '::' from the end of the supplied partial use statement.
+
+MessageParseBothHalvesOffOneOfFailed Message Message:
+  The Parser has tried two expansions but both have failed. 1 is the message of the prefered expansion, 2 is the message from the replacement expansion
