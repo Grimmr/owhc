@@ -18,6 +18,8 @@ data NodeMembers = NodeMemberList [NodeMember] | NodeMemberStar deriving (Show);
 data NodeUseStatement = NodeUseStatement {alias::Maybe LeafName, ident::NodeIdentifier, members::Maybe NodeMembers} deriving (Show);
 data NodeSubunit = NodeSubunit [NodeUseStatement] [NodeDeclaration] deriving (Show);
 
+data Empty = Empty deriving (Show);
+
 checkToken :: Token.TokenType -> Token.Token -> Bool
 checkToken t l = (Token.tokenType l) == t
 
@@ -28,6 +30,15 @@ checkTokens (t:ts) (l:ls) = checkToken t l && checkTokens ts ls
 consumeToken :: Token.TokenType -> [Token.Token] -> Fallible (ParseResult Token.Token);
 consumeToken t (h:tail) | (Token.tokenType h) == t = Success [] ParseResult{node=h, tokens=tail, start=h, end=h};
 consumeToken t (h:_) = Fail [MessageParseExpectedOneFoundAnother{expected=t, found=h}]; 
+
+consumeTokens :: [Token.TokenType] -> [Token.Token] -> Fallible (ParseResult Empty);
+consumeTokens (h:tail) tok = do n1 <- consumeToken h tok
+                                n2 <- consumeTokens tail (tokens n1)
+                                Success [] ParseResult{node=Empty, tokens=(tokens n2), start=(start n1), end=(end n2)}
+
+shellMaybeList :: Maybe [a] -> [a]
+shellMaybeList Nothing = []
+shellMaybeList (Just as) = as 
 
 optional :: ([Token.Token] -> Fallible (ParseResult b)) -> ParseResult c -> [Token.Token] -> Fallible (ParseResult (Maybe b))
 optional f p tok | Success m ParseResult{node=n, tokens=t, start=s, end=e} <- f tok = Success m (ParseResult{node=(Just n), tokens=t, start=s, end=e})
@@ -53,12 +64,11 @@ parseLeafName tok = do n1 <- consumeToken Token.NAME tok
 
 {-6.4-}
 parseNodeIdentifier :: [Token.Token] -> Fallible (ParseResult NodeIdentifier)
-parseNodeIdentifier tok@(h1:h2:_) | checkToken Token.DBL_COL h2 = do n1 <- parseLeafName tok
-                                                                     n2 <- consumeToken Token.DBL_COL (tokens n1)
-                                                                     n3 <- parseNodeIdentifier (tokens n2)
-                                                                     Success [] (ParseResult{node=((node n1):node(n3)), tokens=(tokens n2), start=(start n1), end=(end n3)})
 parseNodeIdentifier tok = do n1 <- parseLeafName tok
-                             Success [] (ParseResult{node=[node (n1)], tokens=(tokens n1), start=(start n1), end=end(n1)})
+                             n2 <- optional hDblColThenIdent n1 (tokens n1)
+                             Success [] ParseResult{node=([node n1]++(shellMaybeList (node n2))), tokens=(tokens n2), start=(start n1), end=(end n2)}
+                         where
+                            hDblColThenIdent t = do {m1 <- consumeToken Token.DBL_COL t; m2 <- parseNodeIdentifier (tokens m1); Success [] ParseResult{node=(node m2), tokens=(tokens m2), start=(start m1), end=(end m2)}}
 
 {-6.12-}
 parseNodeMember :: [Token.Token] -> Fallible (ParseResult NodeMember)
@@ -70,40 +80,34 @@ parseNodeMember tok = oneOf (hTwoNames) (hOneName) tok
 
 parseNodeMemberList :: [Token.Token] -> Fallible (ParseResult [NodeMember])
 parseNodeMemberList tok = do n1 <- parseNodeMember tok
-                             n2 <- (oneOf hComaThenList (hOptionalComma n1) (tokens n1))
+                             n2 <- oneOf hComaThenList (hOptionalComma n1) (tokens n1)
                              Success [] (ParseResult{node=([(node n1)]++(node n2)), tokens=(tokens n2), start=(start n1), end=(end n2)})
                           where
                              hComaThenList t = do {m1 <- consumeToken Token.COMA t; m2 <- parseNodeMemberList (tokens m1); Success [] (ParseResult{node=(node m2), tokens=(tokens m2), start=(start m1), end=(end m1)})} 
                              hOptionalComma d t = do {m1 <- optional (consumeToken Token.COMA) d t; Success [] (ParseResult{node=[], tokens=(tokens m1), start=(start m1), end=(end m1)})}
 
-parseNodeMembers :: [Token.Token] -> Fallible (ParseResult (Maybe NodeMembers))
-parseNodeMembers tok@(h1:h2:_) | checkTokens [Token.DBL_COL, Token.L_BRACE] [h1, h2]  = do n1 <- consumeToken Token.DBL_COL tok
-                                                                                           n2 <- consumeToken Token.L_BRACE (tokens n1)
-                                                                                           n3 <- parseNodeMemberList (tokens n2)
-                                                                                           n4 <- consumeToken Token.R_BRACE (tokens n3)
-                                                                                           Success [] (ParseResult{node=(Just (NodeMemberList (node n3))), tokens=(tokens n4), start=(start n1), end=(end n4)})
-parseNodeMembers tok@(h1:h2:_) | checkTokens [Token.DBL_COL, Token.STAR] [h1, h2]  = do n1 <- consumeToken Token.DBL_COL tok
-                                                                                        n2 <- consumeToken Token.STAR (tokens n1) 
-                                                                                        Success [] (ParseResult{node=(Just (NodeMemberStar)), tokens=(tokens n2), start=(start n1), end=(end n2)})
-parseNodeMembers tok@(h1:_) | checkToken Token.DBL_COL h1 = Fail [MessageParseUseStatementDblColButNoMembers h1] 
-parseNodeMembers tok = Success [] (ParseResult{node=Nothing, tokens=tok})
+parseNodeMembers :: [Token.Token] -> Fallible (ParseResult NodeMembers)
+parseNodeMembers tok = do n1 <- consumeToken Token.DBL_COL tok
+                          n2 <- oneOf hStar hList (tokens n1)
+                          Success [] ParseResult{node=(node n2), tokens=(tokens n2), start=(start n1), end=(end n2)} 
+                       where
+                          hStar t = do {m1 <- consumeToken Token.STAR t; Success [] ParseResult{node=(NodeMemberStar), tokens=(tokens m1), start=(start m1), end=(end m1)}}
+                          hList t = do {m1 <- consumeToken Token.L_BRACE t; m2 <- parseNodeMemberList (tokens m1); m3 <- consumeToken Token.R_BRACE (tokens m2); Success [] ParseResult{node=(NodeMemberList (node m2)), tokens=(tokens m3), start=(start m1), end=(end m3)}} 
 
-parseNodeImportAlias :: [Token.Token] -> Fallible (ParseResult (Maybe LeafName))
-parseNodeImportAlias tok@(h1:h2:_) | checkTokens [Token.NAME, Token.EQ] [h1,h2] = do n1 <- parseLeafName tok
-                                                                                     n2 <- consumeToken Token.EQ (tokens n1)
-                                                                                     Success [] (ParseResult{node=(Just (node n1)),tokens=(tokens n2),start=(start n1),end=(end n2)})
-parseNodeImportAlias tok = Success [] (ParseResult{node=Nothing, tokens=tok})
+parseNodeImportAlias :: [Token.Token] -> Fallible (ParseResult LeafName)
+parseNodeImportAlias tok = do n1 <- parseLeafName tok
+                              n2 <- consumeToken Token.EQ (tokens n1)
+                              Success [] (ParseResult{node=(node n1),tokens=(tokens n2),start=(start n1),end=(end n2)})
 
-
-valdiateNodeUseStatement (Success m (ParseResult{node=(NodeUseStatement{alias=Just _, members=Just NodeMemberStar}), tokens=_, start=s})) = Fail (m++[MessageParseUseStatementHasAliasAndStar s])
-validateNodeUseStatement a = a
 parseNodeUseStatement :: [Token.Token] -> Fallible (ParseResult NodeUseStatement)
-parseNodeUseStatement tok = validateNodeUseStatement (do n1 <- consumeToken Token.USE tok
-                                                         n2 <- parseNodeImportAlias (tokens n1)
-                                                         n3 <- parseNodeIdentifier (tokens n2)
-                                                         n4 <- parseNodeMembers (tokens n3)
-                                                         n5 <- consumeToken Token.SEMI (tokens n4)
-                                                         Success [] (ParseResult{node=(NodeUseStatement (node n2) (node n3) (node n4)), tokens=(tokens n5), start=(start n1), end=(end n5)}))
+parseNodeUseStatement tok = do n1 <- consumeToken Token.USE tok
+                               n2 <- oneOf (hWithOptionalAlias n1) hWithStar (tokens n1)
+                               n3 <- consumeToken Token.SEMI (tokens n2)
+                               Success [] (ParseResult{node=(node n2), tokens=(tokens n3), start=(start n1), end=(end n3)})
+                            where                                
+                               hWithOptionalAlias d t = do {m1 <- optional parseNodeImportAlias d t; m2 <- parseNodeIdentifier (tokens m1); m3 <- optional hMemberList m2 (tokens m2); Success [] ParseResult{node=(NodeUseStatement (node m1) (node m2) (node m3)), tokens=(tokens m3), start=(start m1), end=(end m3)}}
+                               hMemberList t = do {m1 <- consumeTokens [Token.DBL_COL, Token.L_BRACE] t; m2 <- parseNodeMemberList (tokens m1); m3 <- consumeToken Token.R_BRACE (tokens m2); Success [] ParseResult{node=(NodeMemberList (node m2)), tokens=(tokens m3), start=(start m1), end=(end m3)}}  
+                               hWithStar t = do {m1 <- parseNodeIdentifier t; m2 <- consumeTokens [Token.DBL_COL, Token.STAR] (tokens m1); Success [] ParseResult{node=(NodeUseStatement Nothing (node m1) (Just NodeMemberStar))}}
 
 parseNodeImports :: [Token.Token] -> Fallible (ParseResult [NodeUseStatement])
 parseNodeImports tok@(h:_) | (Token.tokenType h) == Token.USE = do n1 <- parseNodeUseStatement tok
