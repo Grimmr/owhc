@@ -7,16 +7,24 @@ data ParseResult t = ParseResult {node::t, tokens::[Token.Token], start::Token.T
 
 data Dummy = Dummy String deriving (Show);
 data NodeDummyPair = NodeDummyPair Dummy Dummy deriving (Show);
-data NodeDeclaration = NodeDeclaration Dummy deriving (Show);
+
+type NodeType = Dummy;
+type NodeExpression = Dummy;
+type NodeStaticAssertionExpression = Dummy;
 
 data LeafName = LeafName String deriving (Show);
+data LeafStringConstant = LeafName String deriving (Show);
 
 type NodeIdentifier = [LeafName];
+
+data NodeGlobalBinding = NodeGlobalBinding{declAttr::Maybe LeafStringConstant, threadLocal::Bool, GBIdent::NodeIdentifier, GBType::Maybe NodeType, GBExpr::Maybe NodeExpression} deriving (Show)
+data NodeDeclaration = NodeGlobalDeclaration Bool [NodeGlobalBinding] | NodeGlobalStaticAssertionExpression NodeStaticAssertionExpression deriving (Show);
+data NodeTopLevelDeclaration = NodeTopLevelDeclaration{exported::Bool, dec::NodeDeclaration} deriving (Show);
 
 data NodeMember = NodeMember {memberAlias::Maybe LeafName, memberActual::LeafName} deriving (Show);
 data NodeMembers = NodeMemberList [NodeMember] | NodeMemberStar deriving (Show);
 data NodeUseStatement = NodeUseStatement {alias::Maybe LeafName, ident::NodeIdentifier, members::Maybe NodeMembers} deriving (Show);
-data NodeSubunit = NodeSubunit [NodeUseStatement] [NodeDeclaration] deriving (Show);
+data NodeSubunit = NodeSubunit [NodeUseStatement] [NodeTopLevelDeclaration] deriving (Show);
 
 data Empty = Empty deriving (Show);
 
@@ -36,13 +44,15 @@ consumeTokens (h:tail) tok | tail /= [] = do n1 <- consumeToken h tok
                                              n2 <- consumeTokens tail (tokens n1)
                                              Success [] ParseResult{node=Empty, tokens=(tokens n2), start=(start n1), end=(end n2)}
                            | tail == [] = do n1 <- consumeToken h tok 
-                                             Success [] ParseResult{node=Empty, tokens=(tokens n1), start=(start n1), end=(end n1)} 
-
-                                
+                                             Success [] ParseResult{node=Empty, tokens=(tokens n1), start=(start n1), end=(end n1)}                    
 
 shellMaybeList :: Maybe [a] -> [a]
 shellMaybeList Nothing = []
 shellMaybeList (Just as) = as 
+
+shellMaybeBool :: Maybe Bool -> Bool
+shellMaybeBool Nothing = False
+shellMaybeBool Just v = v
 
 optional :: ([Token.Token] -> Fallible (ParseResult b)) -> ParseResult c -> [Token.Token] -> Fallible (ParseResult (Maybe b))
 optional f p tok | Success m ParseResult{node=n, tokens=t, start=s, end=e} <- f tok = Success m (ParseResult{node=(Just n), tokens=t, start=s, end=e})
@@ -53,6 +63,11 @@ oneOf f g tok | Success m d <- f tok = Success m d
               | Success m d <- g tok = Success m d
               | Fail m1 <- f tok, Fail m2 <- g tok = Fail [MessageParseBothHalvesOffOneOfFailed m1 m2]
 
+oneOfMany :: [[Token.Token] -> Fallible (ParseResult b)] -> [Token.Token] -> Fallible (ParseResult b)
+oneOfMany [a] tok = a tok
+oneOfMany [a,b] tok = oneOf a b tok
+oneOfMany h:t tok = oneOf h (oneOfMany t) tok 
+
 nothing :: a -> (ParseResult b) -> [Token.Token] -> Fallible (ParseResult a)
 nothing a i tok = Success [] (ParseResult{node=a, tokens=tok, start=(end i), end=(end i)})  
 
@@ -60,24 +75,27 @@ parseNodeDummy :: [Token.Token] -> Fallible (ParseResult Dummy);
 parseNodeDummy tok = do n1 <- consumeToken Token.NAME tok 
                         Success [] (ParseResult{node=Dummy (Token.literal (node n1)), tokens=(tokens n1), start=(start n1), end=(end n1)})
 
-parseNodeDeclarations :: [Token.Token] -> Fallible (ParseResult [NodeDeclaration])
-parseNodeDeclarations tok = do n1 <- parseNodeDummy tok
-                               Success [] ParseResult{node=[NodeDeclaration (node n1)], tokens=(tokens n1), start=(start n1), end=(end n1)}
+parseNodeStaticAssertionExpression = parseNodeDummy;
+parseNodeType = parseNodeDummy;
+parseNodeExpression = parseNodeDummy;
 
 {-Parse Leafs-}
 parseLeafName :: [Token.Token] -> Fallible (ParseResult LeafName)
 parseLeafName tok = do n1 <- consumeToken Token.NAME tok
                        Success [] (ParseResult{node=(LeafName (Token.literal (node n1))), tokens=(tokens n1), start=(start n1), end=(end n1)})
 
-{-6.4-}
+{-6.4 Identifiers-}
 parseNodeIdentifier :: [Token.Token] -> Fallible (ParseResult NodeIdentifier)
 parseNodeIdentifier tok = do n1 <- parseLeafName tok
                              n2 <- optional hDblColThenIdent n1 (tokens n1)
                              Success [] ParseResult{node=([node n1]++(shellMaybeList (node n2))), tokens=(tokens n2), start=(start n1), end=(end n2)}
                          where
-                            hDblColThenIdent t = do {m1 <- consumeToken Token.DBL_COL t; m2 <- parseNodeIdentifier (tokens m1); Success [] ParseResult{node=(node m2), tokens=(tokens m2), start=(start m1), end=(end m2)}}
+                             hDblColThenIdent t = do {m1 <- consumeToken Token.DBL_COL t; m2 <- parseNodeIdentifier (tokens m1); Success [] ParseResult{node=(node m2), tokens=(tokens m2), start=(start m1), end=(end m2)}}
 
-{-6.12-}
+{-6.11 Declarations-}
+
+
+{-6.12 Units -}
 parseNodeMember :: [Token.Token] -> Fallible (ParseResult NodeMember)
 parseNodeMember tok = oneOf (hTwoNames) (hOneName) tok
                       where
@@ -112,10 +130,6 @@ parseNodeImports :: [Token.Token] -> Fallible (ParseResult [NodeUseStatement])
 parseNodeImports tok = do n1 <- parseNodeUseStatement tok
                           n2 <- oneOf parseNodeImports (nothing [] n1) (tokens n1)
                           Success [] ParseResult{node=([node n1]++(node n2)), tokens=(tokens n2), start=(start n1), end=(end n2)} 
-{-parseNodeImports tok@(h:_) | (Token.tokenType h) == Token.USE = do n1 <- parseNodeUseStatement tok
-                                                                   n2 <- parseNodeImports (tokens n1)
-                                                                   Success [] (ParseResult{node=(node n1):(node n2), tokens=(tokens n2), start=(start n1), end=(end n2)}) -}
-parseNodeImports tok = Success [] (ParseResult{node=[], tokens=tok})
 
 parseNodeSubunit :: [Token.Token] -> Fallible (ParseResult NodeSubunit)
 parseNodeSubunit tok = do n1 <- parseNodeImports tok
